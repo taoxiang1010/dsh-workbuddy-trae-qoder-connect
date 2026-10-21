@@ -24,4 +24,5 @@ probes/.qstream-stubs/
 node_modules/
 *.log
 *.patch
+!patches/*.patch
 dist/
