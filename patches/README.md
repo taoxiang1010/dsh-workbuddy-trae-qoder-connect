@@ -10,10 +10,16 @@
 
 | 补丁 | 问题 | 修法 |
 |---|---|---|
-| `0001-workbuddy-system-prompt-prefix-gate.patch` | 国区 WorkBuddy 每一轮都回 `400/11128`，因为 DSH 的 system prompt 以 `You are an AI agent powered by DeepSeek Harness` 开头，命中上游的内容门禁 | `prepareChatBody` 给首条 system 消息前置一个换行；附带把 `X-Conversation-*` 补到国区、并对 11128 重试至多 3 次 |
+| `0001-workbuddy-system-message-content-gate.patch` | 国区 WorkBuddy 每一轮都回 `400/11128`：上游对 **system 消息**做内容检查，出现 `DeepSeek Harness` 就拒，而 DSH 的默认提示词里正好出现 3 次 | `prepareChatBody` 把 system 消息里的 `DeepSeek Harness` 全部替换为 `DeepSeek Harness (DSH)`（出站专用，用户/工具消息不动）；附带把 `X-Conversation-*` 补到国区、并对 11128 重试至多 3 次 |
 | `0002-trae-real-dev-context-window.patch` | Trae 长会话报 `502 context length exceeded`，因为插件把 `max` 档（1M）上报给 DSH，而 Max 模式从未被触发 | 上报真实可用的 dev 窗口 `min(group.dev, devWindowCap)`；输出上限改取 `raw.max_tokens` |
 
-两个补丁分别对应两个 commit，历史与 issue 一一对应。
+两个补丁都是**相对上游 `b3f2068` 的累计快照**（不是逐个 commit 的增量），所以直接
+按文件名顺序全部打上即可；仓库里的 commit 只用来记录改动过程与依据。
+
+> 关于 0001 的结论修正：最初判定为「system 开头那句话」被拦，修法是前置换行；
+> 2026-10-22 用真实提示词重复实验后推翻了——加换行后仍 3/3 全拦，加前后文也拦，
+> 只有把 `DeepSeek Harness` 全部替换才稳定通过。改的是**全文内容**，与位置无关，
+> 且只检查 system 消息。
 
 ## 一键重打
 
