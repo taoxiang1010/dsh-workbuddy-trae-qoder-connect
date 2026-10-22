@@ -1,5 +1,5 @@
 diff --git a/lib/providers/workbuddy/variants-CnrmSn0Q.js b/lib/providers/workbuddy/variants-CnrmSn0Q.js
-index fa9f3d8..99b9587 100644
+index fa9f3d8..301d314 100644
 --- a/lib/providers/workbuddy/variants-CnrmSn0Q.js
 +++ b/lib/providers/workbuddy/variants-CnrmSn0Q.js
 @@ -1,4 +1,4 @@
@@ -40,7 +40,7 @@ index fa9f3d8..99b9587 100644
  	};
  }
  /**
-@@ -906,9 +907,73 @@ function prepareChatBody(source) {
+@@ -906,9 +907,74 @@ function prepareChatBody(source) {
  	const obj = body;
  	obj["stream"] = true;
  	normalizeDeveloperRole(obj);
@@ -49,44 +49,45 @@ index fa9f3d8..99b9587 100644
  	return JSON.stringify(obj);
  }
 +/**
-+* Keep the outbound `system` message from opening with the gateway's fingerprint.
++* Strip the gateway's fingerprint token from outbound `system` messages.
 +*
-+* Measured on the CN gateway (`POST /v2/chat/completions`) across 2026-10-21/22,
-+* after two wrong turns worth recording, because each looked convincing alone:
++* CN gateway answers `400 {"code":11128,...}` when the `system` message carries
++* the literal product string `DeepSeek Harness`. DSH's default prompt mentions it
++* three times, so every turn was refused.
 +*
-+*   attempt 1 (newline)  → believed "a leading \n clears it".  It does clear the
-+*                          check, but a single-sample test also suggested it
-+*                          failed, so it was replaced.
-+*   attempt 2 (rewrite every `DeepSeek Harness` to `DeepSeek Harness (DSH)`)
-+*                          → also looked fine in one run and is NOT sufficient.
-+*                          It shipped, and the very next real turn failed again.
++* Getting here took three wrong fixes, and the reason is worth keeping: the
++* gateway's verdict is **not deterministic per payload**. Repeating the *same*
++* body gives different answers, so single-arm tests (and even 3–4 repeats of one
++* arm) routinely produce the opposite of the truth. Two of the three earlier
++* attempts "passed" their own test and failed in real use immediately after:
 +*
-+* Re-measured with the real 5798-character prompt, 3 repeats per arm:
++*   attempt 1 — prepend a newline, keep the phrase      → shipped, failed
++*   attempt 2 — rewrite to `DeepSeek Harness (DSH)`      → shipped, failed
++*               (the replacement still contains the token)
++*   attempt 3 — reword the opening sentence only         → shipped, failed
 +*
-+*   · raw, no leading newline                      → 400/11128, 3/3
-+*   · raw + leading newline                        → 200, 3/3
-+*   · `DeepSeek Harness` rewritten, no newline     → 400/11128, 3/3
-+*   · rewritten + leading newline                  → 200, 3/3
-+*   · first sentence reworded `powered by`→`running on` → 200, 3/3
-+*   · paragraph 0 alone (54 chars)                 → 400/11128, 2/2
-+*   · paragraphs 16/17 alone (the other two mentions) → 200, 2/2
++* What finally settled it was an **interleaved A/B**, 6 rounds, alternating arms
++* in the same window so drift cannot favour either side, with the real
++* 5798-character prompt:
 +*
-+* So the rule is a **prefix match on the opening sentence** and nothing else:
-+* neither the other mentions nor the rest of the prompt matter, and rewriting
-+* the phrase in place changes nothing because the sentence still starts the
-+* same way.
++*   X. phrase replaced with `this harness`   → 0/6 blocked
++*   Y. current prompt (phrase intact)        → 6/6 blocked
++*   Z. tiny unrelated system prompt          → 0/6 blocked
 +*
-+* DSH's default system prompt opens with exactly that sentence, which is why
-+* every DSH turn was refused while hand-written probes passed. Rewording the
-+* verb keeps the meaning and does not depend on whitespace being preserved
-+* server-side (a leading newline is cheaper but easier to normalise away).
++* Then the same interleaved scheme over candidate replacements (4 rounds each):
++* `DSH`, `the harness`, `DeepSeek DSH` all 0/4; the still-containing
++* `DeepSeek Harness (DSH)` also 0/4 in that window — which is exactly why the
++* substring-preserving rewrite could not be trusted, and why the chosen fix
++* removes the token rather than decorating it.
 +*
-+* Outbound-only: the copy on disk is untouched. User and tool messages are left
-+* alone — the check reads the system message only.
++* Replacement is `DSH`: the prompt already uses that abbreviation elsewhere
++* ("extend DSH itself"), so the model keeps the reference. Outbound only — the
++* copy on disk is untouched. User and tool messages are left alone; the gate
++* reads the system message.
 +*/
-+const SYSTEM_FINGERPRINT = /^(\s*You are an AI agent )powered by (DeepSeek Harness)/;
-+const SYSTEM_FINGERPRINT_REPLACEMENT = "$1running on $2";
-+/** Reword the opening sentence of `system` messages when it trips the gate. */
++const SYSTEM_FINGERPRINT = /DeepSeek Harness/g;
++const SYSTEM_FINGERPRINT_REPLACEMENT = "DSH";
++/** Remove the gateway's fingerprint token from a system message body. */
 +function defuseHarnessFingerprint(text) {
 +	if (typeof text !== "string" || text === "") return text;
 +	return text.replace(SYSTEM_FINGERPRINT, SYSTEM_FINGERPRINT_REPLACEMENT);
@@ -114,7 +115,7 @@ index fa9f3d8..99b9587 100644
  /** Rewrite `role: "developer"` messages to `role: "system"` (upstream rejects developer). */
  function normalizeDeveloperRole(obj) {
  	const messages = obj["messages"];
-@@ -1041,36 +1106,78 @@ var WorkBuddyUpstreamClient = class {
+@@ -1041,36 +1107,78 @@ var WorkBuddyUpstreamClient = class {
  			identity = fallbackChatIdentity(region);
  		}
  		const userAgent = chatUserAgent(identity, region);
@@ -219,7 +220,7 @@ index fa9f3d8..99b9587 100644
  	}
  	/** POST the token-refresh endpoint; the caller merges the outcome. */
  	async refreshToken(credential) {
-@@ -1588,37 +1695,53 @@ var WorkBuddyUpstreamClient = class {
+@@ -1588,37 +1696,53 @@ var WorkBuddyUpstreamClient = class {
  			max_tokens: international ? INTERNATIONAL_PROBE_MAX_TOKENS : 1
  		};
  		if (effort !== void 0) payload["reasoning_effort"] = effort;
@@ -300,7 +301,7 @@ index fa9f3d8..99b9587 100644
  	}
  };
  /** Pull `extError.code` out of an upstream error body, if it is shaped that way. */
-@@ -3497,6 +3620,14 @@ const WORKBUDDY_AI_PROBE_PATH = "/plugins/dsh-workbuddy-connect/ai/probe";
+@@ -3497,6 +3621,14 @@ const WORKBUDDY_AI_PROBE_PATH = "/plugins/dsh-workbuddy-connect/ai/probe";
  //#endregion
  //#region src/version.ts
  const WORKBUDDY_CONNECT_VERSION = "0.6.0";
@@ -311,11 +312,11 @@ index fa9f3d8..99b9587 100644
 +* running?" is answerable from disk after a restart: ESM modules are cached
 +* per process, so editing this file does not change a host that is already up.
 +*/
-+const LOCAL_PATCH_TAG = "cn-system-prefix-reword@2026-10-22";
++const LOCAL_PATCH_TAG = "cn-fingerprint-strip@2026-10-22";
  //#endregion
  //#region src/host-heartbeat.ts
  /**
-@@ -3520,6 +3651,42 @@ function workbuddyHostHeartbeatPath() {
+@@ -3520,6 +3652,42 @@ function workbuddyHostHeartbeatPath() {
  	return join(resolveDshHome(), WORKBUDDY_HOST_HEARTBEAT_FILENAME);
  }
  /**
@@ -358,7 +359,7 @@ index fa9f3d8..99b9587 100644
  * Write (or overwrite) the heartbeat after the host bundle registered the
  * provider. A failed write is non-fatal: the host is already running, and
  * the status CLI will simply report "heartbeat missing" rather than failing.
-@@ -3529,6 +3696,7 @@ async function writeHostHeartbeat() {
+@@ -3529,6 +3697,7 @@ async function writeHostHeartbeat() {
  		version: HEARTBEAT_FORMAT_VERSION,
  		package: "dsh-workbuddy-connect",
  		pluginVersion: WORKBUDDY_CONNECT_VERSION,

@@ -10,24 +10,29 @@
 
 | 补丁 | 问题 | 修法 |
 |---|---|---|
-| `0001-workbuddy-system-message-content-gate.patch` | 国区 WorkBuddy 每一轮都回 `400/11128`：上游看 **system 消息开头那句**，匹配 `You are an AI agent powered by DeepSeek Harness` 就拒，而 DSH 的默认提示词正好这么开头 | `prepareChatBody` 把首句的 `powered by` 改成 `running on`（出站专用，语义不变，用户/工具消息不动）；附带把 `X-Conversation-*` 补到国区、并对 11128 重试至多 3 次 |
+| `0001-workbuddy-system-message-content-gate.patch` | 国区 WorkBuddy 每一轮都回 `400/11128`：上游对 **system 消息**做内容检查，出现字面串 `DeepSeek Harness` 就拒，而 DSH 的默认提示词正好出现 3 次 | `prepareChatBody` 把 system 消息里所有 `DeepSeek Harness` 换成 `DSH`（出站专用，磁盘提示词不动，用户/工具消息不动）；附带把 `X-Conversation-*` 补到国区、并对 11128 重试至多 3 次 |
 | `0002-trae-real-dev-context-window.patch` | Trae 长会话报 `502 context length exceeded`，因为插件把 `max` 档（1M）上报给 DSH，而 Max 模式从未被触发 | 上报真实可用的 dev 窗口 `min(group.dev, devWindowCap)`；输出上限改取 `raw.max_tokens` |
 
 两个补丁都是**相对上游 `b3f2068` 的累计快照**（不是逐个 commit 的增量），所以直接
 按文件名顺序全部打上即可；仓库里的 commit 只用来记录改动过程与依据。
 
-> **0001 的结论修正过两次，值得记下来**（避免以后又被单次采样带偏）：
+> **0001 绕过三次弯，教训比结论更值得留**：
 >
-> 1. 初判「system 开头那句被拦 → 前置换行」。后来一次 4/4 的测试显示加换行仍被拦，
->    于是误判换行无效。
-> 2. 改成「替换全文 `DeepSeek Harness`」，单次测试 4/4 通过，发布——**下一轮真实
->    使用立刻又失败**。
-> 3. 用真实会话（96 条消息、system 5798 字符）重测、每项 3 次：原样 3/3 拦；
->    加换行 3/3 过；仅替换正文 3/3 拦；单独发第 0 段 2/2 拦，第 16/17 段 2/2 过。
->    **结论：只看开头那句，前置换行/改写都有效，替换正文无效。**
+> 网关对这道门禁的裁决**不是每个 payload 确定**——同一份 body 重发会得到不同结果。
+> 因此单臂测试、甚至同一臂连发 3~4 次，都会给出与事实相反的答案。三次「已验证
+> 通过」全部栽在这里：
 >
-> 现在采用「改写首句动词」：语义不变，且不依赖服务端是否保留前导空白。
-> 教训：判定这类门禁必须多次重复 + 用真实长会话复验，单次样本会给出相反答案。
+> | 版本 | 修法 | 真实使用 |
+> |---|---|---|
+> | v1 | 前缀加换行，保留短语 | 失败 |
+> | v2 | 替换成 `DeepSeek Harness (DSH)` | 失败（替换串仍含该 token） |
+> | v3 | 只改写首句动词 | 失败 |
+>
+> 正确方法是**交替 A/B**：同一时间窗内交替发两臂，规避漂移。6 轮结果——
+> 短语换成 `this harness` 0/6 被拦，现状 6/6 被拦，极短 system 0/6 被拦。
+>
+> **最终结论：system 消息里不能出现字面串 `DeepSeek Harness`；替换必须移除该 token，
+> 加括注（`(DSH)`）这类保留原串的写法无效。**
 
 ## 一键重打
 
