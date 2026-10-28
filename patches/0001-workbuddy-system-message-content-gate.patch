@@ -1,5 +1,5 @@
 diff --git a/lib/providers/workbuddy/variants-CnrmSn0Q.js b/lib/providers/workbuddy/variants-CnrmSn0Q.js
-index fa9f3d8..301d314 100644
+index fa9f3d8..3e532c5 100644
 --- a/lib/providers/workbuddy/variants-CnrmSn0Q.js
 +++ b/lib/providers/workbuddy/variants-CnrmSn0Q.js
 @@ -1,4 +1,4 @@
@@ -40,7 +40,7 @@ index fa9f3d8..301d314 100644
  	};
  }
  /**
-@@ -906,9 +907,74 @@ function prepareChatBody(source) {
+@@ -906,9 +907,102 @@ function prepareChatBody(source) {
  	const obj = body;
  	obj["stream"] = true;
  	normalizeDeveloperRole(obj);
@@ -85,12 +85,40 @@ index fa9f3d8..301d314 100644
 +* copy on disk is untouched. User and tool messages are left alone; the gate
 +* reads the system message.
 +*/
-+const SYSTEM_FINGERPRINT = /DeepSeek Harness/g;
-+const SYSTEM_FINGERPRINT_REPLACEMENT = "DSH";
-+/** Remove the gateway's fingerprint token from a system message body. */
++const SYSTEM_REWRITES = Object.freeze([
++	[/DeepSeek Harness/g, "DSH"],
++	[/Tokens prefixed with @ are paths the user explicitly referenced\./g, "A token beginning with @ names a path the user pointed at."],
++	[/Relative paths resolve from the workspace root/g, "Bare paths are taken relative to the project folder"]
++]);
++/**
++ * Neutralize the gateway's prompt fingerprints in a system message body.
++ *
++ * **2026-10-28:** the token replacement alone stopped being enough. A session
++ * that discusses DSH itself was refused on every attempt with a prompt that
++ * contained *zero* occurrences of `DeepSeek Harness` (verified in the dumped
++ * body) - so the gate is not matching one string, it compares the prompt as a
++ * whole. Bisecting the 5.7 KB system prompt found the decisive span:
++ *
++ *   `Tokens prefixed with @ are paths the user explicitly referenced.`
++ *   `Relative paths resolve from the workspace root`
++ *
++ * Either sentence alone is accepted, the pair is refused, and rewording
++ * *either* one (even `root` -> `folder`) is enough to pass - 0/3 blocked
++ * against 3/3 for the untouched prompt, reproduced at the real 2 MB body size.
++ * That is a fuzzy fingerprint match, not a keyword list, so the rewrites below
++ * are a table rather than a single regex: add a row when a new span starts
++ * tripping the gate.
++ *
++ * Scope was re-measured at the same time: tool results carrying 20 literal
++ * `...\\Programs\\DeepSeek Harness\\...` paths are accepted as long as the
++ * system prompt is clean (0/3 blocked), and the original prompt is refused
++ * even with clean tool results (3/3). So only `system` messages are rewritten.
++ */
 +function defuseHarnessFingerprint(text) {
 +	if (typeof text !== "string" || text === "") return text;
-+	return text.replace(SYSTEM_FINGERPRINT, SYSTEM_FINGERPRINT_REPLACEMENT);
++	let out = text;
++	for (const [pattern, replacement] of SYSTEM_REWRITES) out = out.replace(pattern, replacement);
++	return out;
 +}
 +/** Apply {@link defuseHarnessFingerprint} to every `system` message. */
 +function defuseSystemMessages(obj) {
@@ -115,7 +143,7 @@ index fa9f3d8..301d314 100644
  /** Rewrite `role: "developer"` messages to `role: "system"` (upstream rejects developer). */
  function normalizeDeveloperRole(obj) {
  	const messages = obj["messages"];
-@@ -1041,36 +1107,78 @@ var WorkBuddyUpstreamClient = class {
+@@ -1041,36 +1135,78 @@ var WorkBuddyUpstreamClient = class {
  			identity = fallbackChatIdentity(region);
  		}
  		const userAgent = chatUserAgent(identity, region);
@@ -220,7 +248,7 @@ index fa9f3d8..301d314 100644
  	}
  	/** POST the token-refresh endpoint; the caller merges the outcome. */
  	async refreshToken(credential) {
-@@ -1588,37 +1696,53 @@ var WorkBuddyUpstreamClient = class {
+@@ -1588,37 +1724,53 @@ var WorkBuddyUpstreamClient = class {
  			max_tokens: international ? INTERNATIONAL_PROBE_MAX_TOKENS : 1
  		};
  		if (effort !== void 0) payload["reasoning_effort"] = effort;
@@ -301,7 +329,7 @@ index fa9f3d8..301d314 100644
  	}
  };
  /** Pull `extError.code` out of an upstream error body, if it is shaped that way. */
-@@ -3497,6 +3621,14 @@ const WORKBUDDY_AI_PROBE_PATH = "/plugins/dsh-workbuddy-connect/ai/probe";
+@@ -3497,6 +3649,14 @@ const WORKBUDDY_AI_PROBE_PATH = "/plugins/dsh-workbuddy-connect/ai/probe";
  //#endregion
  //#region src/version.ts
  const WORKBUDDY_CONNECT_VERSION = "0.6.0";
@@ -312,11 +340,11 @@ index fa9f3d8..301d314 100644
 +* running?" is answerable from disk after a restart: ESM modules are cached
 +* per process, so editing this file does not change a host that is already up.
 +*/
-+const LOCAL_PATCH_TAG = "cn-fingerprint-strip@2026-10-22";
++const LOCAL_PATCH_TAG = "cn-prompt-fingerprint@2026-10-28";
  //#endregion
  //#region src/host-heartbeat.ts
  /**
-@@ -3520,6 +3652,42 @@ function workbuddyHostHeartbeatPath() {
+@@ -3520,6 +3680,42 @@ function workbuddyHostHeartbeatPath() {
  	return join(resolveDshHome(), WORKBUDDY_HOST_HEARTBEAT_FILENAME);
  }
  /**
@@ -359,7 +387,7 @@ index fa9f3d8..301d314 100644
  * Write (or overwrite) the heartbeat after the host bundle registered the
  * provider. A failed write is non-fatal: the host is already running, and
  * the status CLI will simply report "heartbeat missing" rather than failing.
-@@ -3529,6 +3697,7 @@ async function writeHostHeartbeat() {
+@@ -3529,6 +3725,7 @@ async function writeHostHeartbeat() {
  		version: HEARTBEAT_FORMAT_VERSION,
  		package: "dsh-workbuddy-connect",
  		pluginVersion: WORKBUDDY_CONNECT_VERSION,

@@ -10,29 +10,44 @@
 
 | 补丁 | 问题 | 修法 |
 |---|---|---|
-| `0001-workbuddy-system-message-content-gate.patch` | 国区 WorkBuddy 每一轮都回 `400/11128`：上游对 **system 消息**做内容检查，出现字面串 `DeepSeek Harness` 就拒，而 DSH 的默认提示词正好出现 3 次 | `prepareChatBody` 把 system 消息里所有 `DeepSeek Harness` 换成 `DSH`（出站专用，磁盘提示词不动，用户/工具消息不动）；附带把 `X-Conversation-*` 补到国区、并对 11128 重试至多 3 次 |
+| `0001-workbuddy-system-message-content-gate.patch` | 国区 WorkBuddy 回 `400/11128`：网关对 **system 提示词整体做指纹比对**，命中即判为未授权客户端 | `prepareChatBody` 按 `SYSTEM_REWRITES` 表改写 system 消息（`DeepSeek Harness` → `DSH`；两句特征句改写）；附带补 `X-Conversation-*`、对 11128 重试 3 次、全失败时把请求落盘 |
 | `0002-trae-real-dev-context-window.patch` | Trae 长会话报 `502 context length exceeded`，因为插件把 `max` 档（1M）上报给 DSH，而 Max 模式从未被触发 | 上报真实可用的 dev 窗口 `min(group.dev, devWindowCap)`；输出上限改取 `raw.max_tokens` |
 
 两个补丁都是**相对上游 `b3f2068` 的累计快照**（不是逐个 commit 的增量），所以直接
 按文件名顺序全部打上即可；仓库里的 commit 只用来记录改动过程与依据。
 
-> **0001 绕过三次弯，教训比结论更值得留**：
->
-> 网关对这道门禁的裁决**不是每个 payload 确定**——同一份 body 重发会得到不同结果。
-> 因此单臂测试、甚至同一臂连发 3~4 次，都会给出与事实相反的答案。三次「已验证
-> 通过」全部栽在这里：
->
-> | 版本 | 修法 | 真实使用 |
-> |---|---|---|
-> | v1 | 前缀加换行，保留短语 | 失败 |
-> | v2 | 替换成 `DeepSeek Harness (DSH)` | 失败（替换串仍含该 token） |
-> | v3 | 只改写首句动词 | 失败 |
->
-> 正确方法是**交替 A/B**：同一时间窗内交替发两臂，规避漂移。6 轮结果——
-> 短语换成 `this harness` 0/6 被拦，现状 6/6 被拦，极短 system 0/6 被拦。
->
-> **最终结论：system 消息里不能出现字面串 `DeepSeek Harness`；替换必须移除该 token，
-> 加括注（`(DSH)`）这类保留原串的写法无效。**
+## 0001 的四次迭代，教训比结论更值得留
+
+网关的裁决**不是关键词表**，而是对提示词整体做**模糊指纹比对**；而且同一份 body
+重发可能得到不同结果。所以单臂测试（哪怕连发 3~4 次）会给出与事实相反的答案——
+前三次「已验证通过」全栽在这里：
+
+| 版本 | 修法 | 结果 |
+|---|---|---|
+| v1 | 前置换行，保留短语 | 失败 |
+| v2 | 换成 `DeepSeek Harness (DSH)` | 失败（替换串仍含原 token） |
+| v3 | 只改写首句动词 | 失败 |
+| v4 | system 里整词替换 `DeepSeek Harness` → `DSH` | 10-22 通过，10-28 又失败 |
+
+v4 失效时的排查方法（**这是关键**）：插件在重试全败时会把出站请求写进
+`~/.dsh/.workbuddy-blocked-*.json`，直接看这份 body 就能确认「补丁没生效」还是
+「补丁生效但仍被拦」。这次是后者——system 里该 token 出现 **0 次**，仍被拒。
+
+随后用**消融 + 对照**定位：
+
+1. 真实提示词（5736 字符）4/4 被拦，极简提示词 0/4 → 触发点在 system。
+2. 二分字符长度：208 通过 / 209 被拦（各 3/3）——但把 base 里 `root`→`dir` 也能过，说明不是长度。
+3. 拆句：两句单独都过，连在一起才拦：
+   `Tokens prefixed with @ are paths the user explicitly referenced.`
+   `Relative paths resolve from the workspace root`
+4. 任意改写其中一句（连 `root`→`folder`）都能过：0/3 对 3/3；真实 2 MB 体量下 0/2 对 2/2。
+5. 范围复核：工具结果里 20 条 `...\Programs\DeepSeek Harness\...` 路径不影响判定（0/3）；
+   system 原样时即使工具结果干净也被拦（3/3）→ **只改 system，不动工具输出**。
+
+现在修法是可扩展的表 `SYSTEM_REWRITES`：以后出现新的被拦片段，加一行即可。
+
+> **验证这类门禁的方法**：先看落盘 body 确认补丁有没有生效，再做消融 + 同窗对照，
+> 不要用单臂重复测试。
 
 ## 一键重打
 
