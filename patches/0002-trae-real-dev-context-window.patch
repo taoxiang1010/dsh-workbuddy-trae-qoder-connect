@@ -1,8 +1,26 @@
 diff --git a/lib/providers/trae/index.js b/lib/providers/trae/index.js
-index 00f7096..da75e82 100644
+index 00f7096..8cbda5b 100644
 --- a/lib/providers/trae/index.js
 +++ b/lib/providers/trae/index.js
-@@ -2136,15 +2136,43 @@ export function createTraeAdapter(options) {
+@@ -678,6 +678,17 @@ export function createCatalog(options) {
+         contextWindow: Number.isFinite(m.contextWindow) && m.contextWindow > 0 ? m.contextWindow : 128000,
+         maxTokens: Number.isFinite(m.maxTokens) && m.maxTokens > 0 ? m.maxTokens : 16384,
+         supportsImages: m.supportsImages === true,
++        /**
++         * [2026-11-07] devWindowCap must survive into the model object reported to DSH.
++         *
++         * This map used to pick a fixed set of fields and dropped devWindowCap, so
++         * contextWindowFor() saw contextWindowByGroup[fn].dev = 200000 with no cap
++         * and advertised 200000 to DSH. DSH then let the session grow to ~130k
++         * before compacting, while Trae's real dev window is 116000 - hence the
++         * 502 "context length has exceeded". The session log records
++         * request/context contextWindow:200000.
++         */
++        ...(Number.isFinite(m.devWindowCap) && m.devWindowCap > 0 ? { devWindowCap: m.devWindowCap } : {}),
+         /**
+          * 档位配置**按 function 分别保留**。
+          *
+@@ -2136,15 +2147,43 @@ export function createTraeAdapter(options) {
     * `solo_agent_lite` 是 {dev:200000, max:1000000}，在 `solo_work_lite` 只有
     * {dev:200000}。早期导出按模型名去重、只留一个数，1M 那份被 work 组覆盖丢失
     * —— 用户在 Trae 客户端看得到「更大上下文扩至 1M」，插件里却只有 200k。
@@ -48,7 +66,7 @@ index 00f7096..da75e82 100644
    const buildModels = () => {
      const baseUrl = `${shim.baseUrl()}/v1`;
      // hiddenMatcher 返回的是判定函数（(id) => boolean），按函数调用。
-@@ -2163,13 +2191,19 @@ export function createTraeAdapter(options) {
+@@ -2163,13 +2202,19 @@ export function createTraeAdapter(options) {
        cost: NO_COST,
        /**
         * 上下文窗口按当前 function 取目录声明（与档位同一教训：目录是

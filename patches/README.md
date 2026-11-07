@@ -11,10 +11,35 @@
 | 补丁 | 问题 | 修法 |
 |---|---|---|
 | `0001-workbuddy-system-message-content-gate.patch` | 国区 WorkBuddy 回 `400/11128`：网关对**整段 body 做指纹比对**（system 提示词、assistant 输出、工具结果、tool_calls 参数都算） | `prepareChatBody` 把特征句从**每条消息的所有字符串**里改写掉（递归覆盖 content / tool_calls.arguments）；`DeepSeek Harness` -> `DSH` 只作用于 system，避免改坏工具输出里的真实路径；附带补 `X-Conversation-*`、11128 重试 3 次、全失败时落盘 |
-| `0002-trae-real-dev-context-window.patch` | Trae 长会话报 `502 context length exceeded`，因为插件把 `max` 档（1M）上报给 DSH，而 Max 模式从未被触发 | 上报真实可用的 dev 窗口 `min(group.dev, devWindowCap)`；输出上限改取 `raw.max_tokens` |
+| `0002-trae-real-dev-context-window.patch` | Trae 长会话报 `502 context length exceeded`：DSH 被上报了 200000 窗口，实际 dev 只有 116000，会话涨到 ~130k 还不压缩，撞上游上限 | `buildModels` 的 base 映射必须把 `devWindowCap` 带到上报对象里（2026-11-07 续修）；`contextWindowFor()` 取 `min(group.dev, devWindowCap)`；输出上限改取 `raw.max_tokens` |
 
 两个补丁都是**相对上游 `b3f2068` 的累计快照**（不是逐个 commit 的增量），所以直接
 按文件名顺序全部打上即可；仓库里的 commit 只用来记录改动过程与依据。
+
+## 0002 的续修（2026-11-07）
+
+0002 当时只改了 `contextWindowFor()` / `outputTokensFor()`，但**调用方在更早一步
+就把 cap 丢了**：`buildModels` 里 `base = usable.map(...)` 只挑固定字段，没有
+`devWindowCap`。于是 `contextWindowFor()` 看到 `contextWindowByGroup.solo_agent.dev
+= 200000` 却没有 cap，直接把 200000 上报给 DSH。
+
+会话日志 `request/context` 里记录的就是：
+
+```json
+{"provider":"trae","model":"deepseek-v4.1-flash","contextWindow":200000}
+```
+
+后果：DSH 以为窗口 200000 → 允许会话涨到 129662 才压缩（实测压缩次数 0）；
+Trae 上游真实 dev 窗口 116000 → 502；失败后的压缩请求本身也超限 → 死循环。
+
+修法是在 base 映射里补一行：
+
+```js
+...(Number.isFinite(m.devWindowCap) && m.devWindowCap > 0 ? { devWindowCap: m.devWindowCap } : {}),
+```
+
+验证：修复前 `contextWindowFor` 返回 200000 / 256000，修复后返回 116000
+（`Doubao-Seed-Evolving` 本身是 256000 窗口模型，保持原值）。
 
 ## 0001 的五次迭代：范围一次比一次大
 
